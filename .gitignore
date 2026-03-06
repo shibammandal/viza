@@ -1,0 +1,4 @@
+node_modules/
+*.vz
+dist/
+.DS_Store

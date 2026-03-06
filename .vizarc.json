@@ -1,0 +1,16 @@
+{
+  "ignore": [
+    "node_modules",
+    ".git",
+    "dist",
+    "build",
+    ".vscode",
+    "__pycache__",
+    ".next",
+    "coverage",
+    ".nyc_output",
+    "*.vz"
+  ],
+  "maxFileSize": 102400,
+  "maxDepth": 10
+}
