@@ -9,6 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const { detectLanguage, getLanguageParser } = require('./languageDetector');
 const { parseImports } = require('./importParser');
+const { extractSymbols } = require('./symbolExtractor');
 
 // Default ignore patterns
 const DEFAULT_IGNORE = [
@@ -94,6 +95,11 @@ async function analyzeRepo(repoPath, options = {}) {
           // Extract exports/functions info
           const metadata = extractMetadata(content, language, name);
 
+          // Deep symbol extraction (functions, classes with bodies & line ranges)
+          const symbols = content && language !== 'binary'
+            ? extractSymbols(content, language)
+            : [];
+
           const fileNode = {
             id: generateId(relativePath),
             name: name,
@@ -105,6 +111,7 @@ async function analyzeRepo(repoPath, options = {}) {
             lines: lines,
             content: includeContent ? content : undefined,
             metadata: metadata,
+            symbols: symbols,
             imports: [],
             exports: [],
           };

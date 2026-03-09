@@ -29,6 +29,9 @@
     <button class="tb" id="btnPan" title="Pan (H)">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 9l-3 3 3 3M9 5l3-3 3 3M15 19l-3 3-3-3M19 9l3 3-3 3"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/></svg>
     </button>
+    <button class="tb" id="btnWire" title="Wire (W)">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="5" cy="5" r="2.5"/><circle cx="19" cy="19" r="2.5"/><path d="M7 7l10 10"/></svg>
+    </button>
     <i class="sep"></i>
     <button class="tb" id="btnZoomOut" title="Zoom out (–)">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -96,7 +99,18 @@
         <h4>Symbols</h4>
         <div id="detailSymbols"></div>
       </section>
-      <section class="dp-sec">
+      <section class="dp-sec" id="editorSection" style="display:none">
+        <div class="editor-head">
+          <h4 id="editorTitle">Code</h4>
+          <div class="editor-actions">
+            <span class="editor-status" id="editorStatus"></span>
+            <button class="btn-sm" id="btnSaveCode" title="Save (Ctrl+S)">Save</button>
+          </div>
+        </div>
+        <textarea id="codeEditor" spellcheck="false" autocomplete="off" autocorrect="off"></textarea>
+        <div class="editor-meta" id="editorMeta"></div>
+      </section>
+      <section class="dp-sec" id="previewSection">
         <h4>Preview</h4>
         <pre class="dp-code"><code id="detailCode"></code></pre>
       </section>
@@ -113,9 +127,13 @@
   <!-- Context menu -->
   <div id="contextMenu" class="ctx closed">
     <div class="ctx-item" data-action="focus">Focus</div>
+    <div class="ctx-item" data-action="expand">Expand / Collapse</div>
     <div class="ctx-item" data-action="connections">Highlight connections</div>
     <div class="ctx-item" data-action="isolate">Isolate</div>
     <div class="ctx-item" data-action="hide">Hide</div>
+    <div class="ctx-sep"></div>
+    <div class="ctx-item" data-action="addFunction">+ New function</div>
+    <div class="ctx-item" data-action="newFile">+ New file</div>
     <div class="ctx-sep"></div>
     <div class="ctx-item" data-action="showAll">Show all</div>
   </div>

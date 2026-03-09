@@ -1,21 +1,25 @@
 /**
- * Viza Graph Engine — Minimalist Edition
+ * Viza Graph Engine — Deep Edition
  * 
- * Clean, elegant canvas rendering with:
- * - Rounded rectangle nodes with soft shadows
- * - Smooth bezier edges
- * - Refined force-directed layout
- * - Gentle animations
+ * Hierarchical canvas rendering with:
+ * - File nodes that expand to reveal functions/classes
+ * - Child symbol nodes rendered inside expanded parents
+ * - Smooth bezier edges with arrow heads
+ * - Force-directed layout with expand/collapse
+ * - Drag-and-drop with wiring mode
  */
 
 class VizaGraph {
   constructor(canvas) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
-    this.nodes = [];
+    this.nodes = [];       // file-level nodes
+    this.childNodes = [];  // all symbol child nodes (rendered when parent expanded)
     this.edges = [];
     this.groups = [];
-    this.nodeMap = new Map();
+    this.nodeMap = new Map();   // id -> file node
+    this.childMap = new Map();  // id -> child node
+    this.expandedNodes = new Set(); // file ids that are expanded
 
     // Camera
     this.camera = { x: 0, y: 0, zoom: 1 };
@@ -24,11 +28,12 @@ class VizaGraph {
     this.draggingNode = null;
     this.dragOffset = { x: 0, y: 0 };
     this.hoveredNode = null;
-    this.selectedNode = null;
+    this.selectedNode = null;  // can be file OR child
     this.isPanning = false;
     this.panStart = { x: 0, y: 0 };
     this.lastMouse = { x: 0, y: 0 };
-    this.mode = 'select';
+    this.mode = 'select'; // 'select' | 'pan' | 'wire'
+    this.wireStart = null; // for wire mode
 
     // Display
     this.showEdges = true;
@@ -47,14 +52,19 @@ class VizaGraph {
     this.needsRedraw = true;
     this.dpr = window.devicePixelRatio || 1;
 
-    // Node sizing
-    this.nodeWidth = 90;
-    this.nodeHeight = 36;
+    // Sizing
+    this.collapsedH = 36;
+    this.childH = 26;
+    this.childGap = 2;
+    this.headerH = 32;
+    this.expandPadding = 8;
 
     // Callbacks
     this.onNodeSelect = null;
     this.onNodeHover = null;
     this.onNodeContextMenu = null;
+    this.onSymbolSelect = null;
+    this.onWireConnect = null;
 
     this._setupCanvas();
     this._bindEvents();
@@ -85,8 +95,6 @@ class VizaGraph {
     this.canvas.addEventListener('wheel', (e) => this._onWheel(e), { passive: false });
     this.canvas.addEventListener('dblclick', (e) => this._onDblClick(e));
     this.canvas.addEventListener('contextmenu', (e) => this._onContextMenu(e));
-
-    // Touch
     this.canvas.addEventListener('touchstart', (e) => this._onTouchStart(e), { passive: false });
     this.canvas.addEventListener('touchmove', (e) => this._onTouchMove(e), { passive: false });
     this.canvas.addEventListener('touchend', (e) => this._onTouchEnd(e));
@@ -97,12 +105,13 @@ class VizaGraph {
   loadData(data) {
     this.nodes = data.nodes.map((n, i) => ({
       ...n,
+      _nodeType: 'file',
       x: n.position?.x || (this.width / 2 + (Math.random() - 0.5) * 400),
       y: n.position?.y || (this.height / 2 + (Math.random() - 0.5) * 400),
       vx: 0,
       vy: 0,
       w: this._calcWidth(n),
-      h: this.nodeHeight,
+      h: this.collapsedH,
       visible: true,
     }));
 
@@ -110,7 +119,30 @@ class VizaGraph {
     this.groups = data.groups || [];
 
     this.nodeMap.clear();
-    this.nodes.forEach(n => this.nodeMap.set(n.id, n));
+    this.childMap.clear();
+    this.childNodes = [];
+    this.nodes.forEach(n => {
+      this.nodeMap.set(n.id, n);
+      // Pre-create child nodes for each symbol
+      if (n.symbols?.length) {
+        n._children = n.symbols.map((sym, idx) => {
+          const child = {
+            ...sym,
+            _nodeType: 'symbol',
+            _parentId: n.id,
+            x: 0, y: 0,
+            w: 0, h: this.childH,
+            visible: false,
+            vx: 0, vy: 0,
+          };
+          this.childMap.set(sym.id, child);
+          this.childNodes.push(child);
+          return child;
+        });
+      } else {
+        n._children = [];
+      }
+    });
 
     this._runForceLayout();
     setTimeout(() => this.fitAll(), 100);
@@ -118,9 +150,68 @@ class VizaGraph {
   }
 
   _calcWidth(node) {
-    const baseW = 80;
-    const charW = Math.min(node.name.length * 6, 120);
-    return Math.max(baseW, charW + 24);
+    const baseW = 100;
+    const nameW = Math.min(node.name.length * 7, 140);
+    const symCount = node.symbols?.length || 0;
+    // If symbols exist, need wider for child labels
+    const childMaxLen = symCount > 0
+      ? Math.max(...node.symbols.map(s => s.name.length)) * 6.5 + 40
+      : 0;
+    return Math.max(baseW, nameW + 30, childMaxLen);
+  }
+
+  /** Recalculate node height and child positions after expand/collapse */
+  _recalcExpanded(node) {
+    if (!this.expandedNodes.has(node.id)) {
+      node.h = this.collapsedH;
+      node._children.forEach(c => c.visible = false);
+      return;
+    }
+
+    const children = node._children;
+    if (!children.length) {
+      node.h = this.collapsedH;
+      return;
+    }
+
+    const totalChildH = children.length * (this.childH + this.childGap);
+    node.h = this.headerH + totalChildH + this.expandPadding * 2;
+
+    const startY = node.y - node.h / 2 + this.headerH + this.expandPadding;
+
+    children.forEach((child, i) => {
+      child.x = node.x;
+      child.y = startY + i * (this.childH + this.childGap) + this.childH / 2;
+      child.w = node.w - 16;
+      child.visible = true;
+    });
+  }
+
+  // ===== EXPAND / COLLAPSE =====
+
+  toggleExpand(nodeId) {
+    if (this.expandedNodes.has(nodeId)) {
+      this.expandedNodes.delete(nodeId);
+    } else {
+      this.expandedNodes.add(nodeId);
+    }
+    const node = this.nodeMap.get(nodeId);
+    if (node) this._recalcExpanded(node);
+    this.needsRedraw = true;
+  }
+
+  expandNode(nodeId) {
+    this.expandedNodes.add(nodeId);
+    const node = this.nodeMap.get(nodeId);
+    if (node) this._recalcExpanded(node);
+    this.needsRedraw = true;
+  }
+
+  collapseNode(nodeId) {
+    this.expandedNodes.delete(nodeId);
+    const node = this.nodeMap.get(nodeId);
+    if (node) this._recalcExpanded(node);
+    this.needsRedraw = true;
   }
 
   // ===== FORCE LAYOUT =====
@@ -135,7 +226,6 @@ class VizaGraph {
         this.simulationRunning = false;
         return;
       }
-
       this.simulationAlpha *= 0.97;
       iterations++;
 
@@ -150,28 +240,30 @@ class VizaGraph {
         node.vy *= 0.8;
         node.x += node.vx * this.simulationAlpha;
         node.y += node.vy * this.simulationAlpha;
+        // Keep children pinned to parent
+        if (this.expandedNodes.has(node.id)) this._recalcExpanded(node);
       }
 
       this.needsRedraw = true;
       if (iterations < 300) requestAnimationFrame(tick);
       else this.simulationRunning = false;
     };
-
     tick();
   }
 
   _applyRepulsion() {
-    const strength = 600;
+    const strength = 800;
     for (let i = 0; i < this.nodes.length; i++) {
       for (let j = i + 1; j < this.nodes.length; j++) {
         const a = this.nodes[i], b = this.nodes[j];
         if (!a.visible || !b.visible) continue;
-
         let dx = b.x - a.x, dy = b.y - a.y;
         let dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        // Account for expanded node size
+        const minDist = (a.h + b.h) / 2 + 40;
+        if (dist < minDist) dist = minDist;
         const force = strength / (dist * dist);
         const fx = (dx / dist) * force, fy = (dy / dist) * force;
-
         a.vx -= fx; a.vy -= fy;
         b.vx += fx; b.vy += fy;
       }
@@ -179,23 +271,21 @@ class VizaGraph {
   }
 
   _applyAttraction() {
-    const strength = 0.04, idealLen = 180;
+    const strength = 0.035, idealLen = 200;
     for (const edge of this.edges) {
       const s = this.nodeMap.get(edge.source), t = this.nodeMap.get(edge.target);
       if (!s || !t || !s.visible || !t.visible) continue;
-
       let dx = t.x - s.x, dy = t.y - s.y;
       let dist = Math.sqrt(dx * dx + dy * dy) || 1;
       const force = (dist - idealLen) * strength;
       const fx = (dx / dist) * force, fy = (dy / dist) * force;
-
       s.vx += fx; s.vy += fy;
       t.vx -= fx; t.vy -= fy;
     }
   }
 
   _applyGrouping() {
-    const strength = 0.015;
+    const strength = 0.012;
     for (const group of this.groups) {
       let cx = 0, cy = 0, count = 0;
       for (const id of group.nodes) {
@@ -204,7 +294,6 @@ class VizaGraph {
       }
       if (count < 2) continue;
       cx /= count; cy /= count;
-
       for (const id of group.nodes) {
         const n = this.nodeMap.get(id);
         if (!n?.visible) continue;
@@ -222,12 +311,11 @@ class VizaGraph {
     }
     if (!count) return;
     cx /= count; cy /= count;
-
     const tx = this.width / 2, ty = this.height / 2;
     for (const n of this.nodes) {
       if (!n.visible) continue;
-      n.vx += (tx - cx) * 0.008;
-      n.vy += (ty - cy) * 0.008;
+      n.vx += (tx - cx) * 0.006;
+      n.vy += (ty - cy) * 0.006;
     }
   }
 
@@ -235,10 +323,7 @@ class VizaGraph {
 
   _startRenderLoop() {
     const render = () => {
-      if (this.needsRedraw) {
-        this._draw();
-        this.needsRedraw = false;
-      }
+      if (this.needsRedraw) { this._draw(); this.needsRedraw = false; }
       this.animFrameId = requestAnimationFrame(render);
     };
     render();
@@ -257,6 +342,19 @@ class VizaGraph {
     if (this.showEdges) this._drawEdges(ctx);
     this._drawNodes(ctx);
 
+    // Wire preview line
+    if (this.wireStart && this.mode === 'wire') {
+      const w = this._screenToWorld(this.lastMouse.x, this.lastMouse.y);
+      ctx.strokeStyle = 'rgba(110, 158, 255, 0.5)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath();
+      ctx.moveTo(this.wireStart.x, this.wireStart.y);
+      ctx.lineTo(w.x, w.y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
     ctx.restore();
   }
 
@@ -274,21 +372,18 @@ class VizaGraph {
       }
 
       const pad = 24;
-      const x = minX - pad, y = minY - pad;
-      const w = maxX - minX + pad * 2, h = maxY - minY + pad * 2;
-
       ctx.fillStyle = 'rgba(255, 255, 255, 0.015)';
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.04)';
       ctx.lineWidth = 1;
       ctx.beginPath();
-      this._roundRect(ctx, x, y, w, h, 12);
+      this._roundRect(ctx, minX - pad, minY - pad, maxX - minX + pad * 2, maxY - minY + pad * 2, 12);
       ctx.fill();
       ctx.stroke();
 
-      // Label
       ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
       ctx.font = '10px Inter, sans-serif';
-      ctx.fillText(group.name, x + 10, y + 16);
+      ctx.textAlign = 'left';
+      ctx.fillText(group.name, minX - pad + 10, minY - pad + 16);
     }
   }
 
@@ -307,24 +402,37 @@ class VizaGraph {
       } else {
         ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
         ctx.lineWidth = 1;
-        ctx.globalAlpha = this.selectedNode ? 0.2 : 1;
+        ctx.globalAlpha = this.selectedNode ? 0.15 : 1;
       }
 
-      // Bezier curve
       const dx = t.x - s.x, dy = t.y - s.y;
-      const cx = (s.x + t.x) / 2 - dy * 0.15;
-      const cy = (s.y + t.y) / 2 + dx * 0.15;
+      const cpx = (s.x + t.x) / 2 - dy * 0.12;
+      const cpy = (s.y + t.y) / 2 + dx * 0.12;
 
       ctx.beginPath();
       ctx.moveTo(s.x, s.y);
-      ctx.quadraticCurveTo(cx, cy, t.x, t.y);
+      ctx.quadraticCurveTo(cpx, cpy, t.x, t.y);
       ctx.stroke();
+
+      // Arrowhead
+      if (hl || rel || !this.selectedNode) {
+        const angle = Math.atan2(t.y - cpy, t.x - cpx);
+        const aLen = 7;
+        ctx.fillStyle = ctx.strokeStyle;
+        ctx.beginPath();
+        ctx.moveTo(t.x, t.y);
+        ctx.lineTo(t.x - aLen * Math.cos(angle - 0.35), t.y - aLen * Math.sin(angle - 0.35));
+        ctx.lineTo(t.x - aLen * Math.cos(angle + 0.35), t.y - aLen * Math.sin(angle + 0.35));
+        ctx.closePath();
+        ctx.fill();
+      }
 
       ctx.globalAlpha = 1;
     }
   }
 
   _drawNodes(ctx) {
+    // Draw non-selected first, then hovered, then selected on top
     const sorted = [...this.nodes].sort((a, b) => {
       if (a === this.selectedNode) return 1;
       if (b === this.selectedNode) return -1;
@@ -338,8 +446,9 @@ class VizaGraph {
 
       const sel = node === this.selectedNode;
       const hov = node === this.hoveredNode;
-      const match = this.searchMatches.size > 0 && this.searchMatches.has(node.id);
-      const dim = this.selectedNode && !sel && !this._isConnected(node.id);
+      const match = this.searchMatches.has(node.id);
+      const dim = this.selectedNode && this.selectedNode._nodeType === 'file' && !sel && !this._isConnected(node.id);
+      const expanded = this.expandedNodes.has(node.id);
 
       const x = node.x - node.w / 2;
       const y = node.y - node.h / 2;
@@ -348,55 +457,143 @@ class VizaGraph {
 
       ctx.globalAlpha = dim ? 0.2 : 1;
 
-      // Glow for selected/hovered
+      // Shadow glow
       if ((sel || hov) && !dim) {
-        ctx.shadowColor = sel ? 'rgba(110, 158, 255, 0.4)' : 'rgba(255, 255, 255, 0.15)';
-        ctx.shadowBlur = sel ? 20 : 10;
+        ctx.shadowColor = sel ? 'rgba(110, 158, 255, 0.35)' : 'rgba(255, 255, 255, 0.1)';
+        ctx.shadowBlur = sel ? 20 : 8;
       }
 
-      // Background
+      // Main background
       ctx.fillStyle = this._nodeColor(sel, hov, match);
       ctx.beginPath();
       this._roundRect(ctx, x, y, w, h, r);
       ctx.fill();
 
       // Border
-      ctx.strokeStyle = sel ? 'rgba(110, 158, 255, 0.6)' : (hov ? 'rgba(255, 255, 255, 0.15)' : 'rgba(255, 255, 255, 0.06)');
+      ctx.strokeStyle = sel ? 'rgba(110, 158, 255, 0.5)' : (hov ? 'rgba(255, 255, 255, 0.12)' : 'rgba(255, 255, 255, 0.06)');
       ctx.lineWidth = sel ? 1.5 : 1;
       ctx.stroke();
-
       ctx.shadowColor = 'transparent';
       ctx.shadowBlur = 0;
 
+      // ── Header row ──
+      const headerY = expanded ? y : y;
+      const headerH = expanded ? this.headerH : h;
+
       // Language dot
-      const dotR = 4;
-      const dotX = x + 12;
-      const dotY = node.y;
       ctx.fillStyle = node.color || '#6e9eff';
       ctx.beginPath();
-      ctx.arc(dotX, dotY, dotR, 0, Math.PI * 2);
+      ctx.arc(x + 14, y + headerH / 2, 4, 0, Math.PI * 2);
       ctx.fill();
 
-      // Label
-      if (this.showLabels && (this.camera.zoom > 0.35 || sel || hov)) {
-        ctx.fillStyle = dim ? 'rgba(255, 255, 255, 0.15)' : 'rgba(255, 255, 255, 0.85)';
+      // File name
+      if (this.showLabels && (this.camera.zoom > 0.3 || sel || hov)) {
+        ctx.fillStyle = dim ? 'rgba(255, 255, 255, 0.15)' : 'rgba(255, 255, 255, 0.9)';
         ctx.font = `${sel ? '500' : '400'} 11px Inter, sans-serif`;
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
+        const maxChars = Math.floor((w - 50) / 6.5);
+        const label = node.name.length > maxChars ? node.name.slice(0, maxChars - 1) + '…' : node.name;
+        ctx.fillText(label, x + 24, y + headerH / 2);
+      }
 
-        const label = node.name.length > 14 ? node.name.slice(0, 13) + '…' : node.name;
-        ctx.fillText(label, x + 22, node.y);
+      // Expand/collapse chevron (if has symbols)
+      if (node._children?.length > 0 && this.camera.zoom > 0.4) {
+        const chevX = x + w - 16;
+        const chevY = y + headerH / 2;
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
+        ctx.font = '10px Inter, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(expanded ? '▾' : `▸ ${node._children.length}`, chevX - (expanded ? 0 : 4), chevY);
+      }
+
+      // ── Children (symbols) if expanded ──
+      if (expanded && node._children?.length > 0) {
+        // Separator line
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.06)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x + 8, y + this.headerH);
+        ctx.lineTo(x + w - 8, y + this.headerH);
+        ctx.stroke();
+
+        for (const child of node._children) {
+          if (!child.visible) continue;
+          this._drawChildNode(ctx, child, node, dim);
+        }
       }
 
       ctx.globalAlpha = 1;
     }
   }
 
+  _drawChildNode(ctx, child, parent, dim) {
+    const cx = child.x - child.w / 2;
+    const cy = child.y - child.h / 2;
+    const cw = child.w;
+    const ch = child.h;
+
+    const sel = child === this.selectedNode;
+    const hov = child === this.hoveredNode;
+
+    // Child background
+    ctx.fillStyle = sel
+      ? 'rgba(110, 158, 255, 0.12)'
+      : hov
+        ? 'rgba(255, 255, 255, 0.06)'
+        : 'rgba(255, 255, 255, 0.02)';
+    ctx.beginPath();
+    this._roundRect(ctx, cx, cy, cw, ch, 5);
+    ctx.fill();
+
+    if (sel) {
+      ctx.strokeStyle = 'rgba(110, 158, 255, 0.4)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+
+    // Type icon
+    const iconX = cx + 10;
+    const iconY = child.y;
+    ctx.font = '9px Inter, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+
+    const typeColors = {
+      function: '#6ee7b7',
+      method: '#93c5fd',
+      class: '#fbbf24',
+      variable: '#c4b5fd',
+    };
+
+    ctx.fillStyle = typeColors[child.type] || '#6e9eff';
+    const typeLabel = child.type === 'function' ? 'ƒ' : child.type === 'method' ? 'm' : child.type === 'class' ? 'C' : 'v';
+    ctx.fillText(typeLabel, iconX, iconY);
+
+    // Symbol name
+    if (this.camera.zoom > 0.5) {
+      ctx.fillStyle = dim ? 'rgba(255, 255, 255, 0.15)' : 'rgba(255, 255, 255, 0.75)';
+      ctx.font = '10px "JetBrains Mono", monospace';
+      const maxChars = Math.floor((cw - 36) / 6);
+      const label = child.name.length > maxChars ? child.name.slice(0, maxChars - 1) + '…' : child.name;
+      ctx.fillText(label, cx + 22, child.y);
+    }
+
+    // Params hint
+    if (this.camera.zoom > 0.8 && child.params?.length > 0) {
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.2)';
+      ctx.font = '9px "JetBrains Mono", monospace';
+      const paramStr = `(${child.params.slice(0, 3).join(', ')}${child.params.length > 3 ? '…' : ''})`;
+      ctx.fillText(paramStr, cx + 22 + (child.name.length + 1) * 6, child.y);
+    }
+  }
+
   _nodeColor(sel, hov, match) {
-    if (match) return 'rgba(250, 204, 21, 0.1)';
-    if (sel) return 'rgba(110, 158, 255, 0.12)';
-    if (hov) return 'rgba(255, 255, 255, 0.06)';
-    return 'rgba(255, 255, 255, 0.03)';
+    if (match) return 'rgba(250, 204, 21, 0.08)';
+    if (sel) return 'rgba(110, 158, 255, 0.1)';
+    if (hov) return 'rgba(255, 255, 255, 0.05)';
+    return 'rgba(255, 255, 255, 0.025)';
   }
 
   _isConnected(nodeId) {
@@ -427,7 +624,17 @@ class VizaGraph {
     };
   }
 
+  /** Hit test: first check children of expanded nodes, then file nodes */
   _getNodeAt(wx, wy) {
+    // Check child nodes first (they're on top)
+    for (const child of this.childNodes) {
+      if (!child.visible) continue;
+      if (wx >= child.x - child.w / 2 && wx <= child.x + child.w / 2 &&
+          wy >= child.y - child.h / 2 && wy <= child.y + child.h / 2) {
+        return child;
+      }
+    }
+    // Then file nodes
     for (let i = this.nodes.length - 1; i >= 0; i--) {
       const n = this.nodes[i];
       if (!n.visible || this.hiddenNodes.has(n.id)) continue;
@@ -438,6 +645,13 @@ class VizaGraph {
     return null;
   }
 
+  /** Check if click is on the expand chevron area */
+  _isChevronClick(node, wx) {
+    if (node._nodeType !== 'file') return false;
+    if (!node._children?.length) return false;
+    return wx > node.x + node.w / 2 - 30;
+  }
+
   _onMouseDown(e) {
     const rect = this.canvas.getBoundingClientRect();
     const world = this._screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
@@ -446,9 +660,18 @@ class VizaGraph {
 
     if (e.button === 0) {
       const node = this._getNodeAt(world.x, world.y);
+
+      if (this.mode === 'wire' && node && node._nodeType === 'file') {
+        this.wireStart = node;
+        this.canvas.classList.add('grabbing');
+        return;
+      }
+
       if (node && this.mode === 'select') {
-        this.draggingNode = node;
-        this.dragOffset = { x: world.x - node.x, y: world.y - node.y };
+        if (node._nodeType === 'file') {
+          this.draggingNode = node;
+          this.dragOffset = { x: world.x - node.x, y: world.y - node.y };
+        }
         this.canvas.classList.add('grabbing');
       } else {
         this.isPanning = true;
@@ -469,17 +692,24 @@ class VizaGraph {
       this.draggingNode.y = world.y - this.dragOffset.y;
       this.draggingNode.vx = 0;
       this.draggingNode.vy = 0;
+      if (this.expandedNodes.has(this.draggingNode.id)) {
+        this._recalcExpanded(this.draggingNode);
+      }
       this.needsRedraw = true;
     } else if (this.isPanning) {
       this.camera.x += (e.clientX - this.panStart.x) / this.camera.zoom;
       this.camera.y += (e.clientY - this.panStart.y) / this.camera.zoom;
       this.panStart = { x: e.clientX, y: e.clientY };
       this.needsRedraw = true;
+    } else if (this.wireStart) {
+      this.needsRedraw = true; // redraw wire preview
     } else {
       const node = this._getNodeAt(world.x, world.y);
       if (node !== this.hoveredNode) {
         this.hoveredNode = node;
-        this.canvas.style.cursor = node ? 'pointer' : (this.mode === 'pan' ? 'grab' : 'default');
+        this.canvas.style.cursor = node
+          ? (this.mode === 'wire' ? 'crosshair' : 'pointer')
+          : (this.mode === 'pan' ? 'grab' : (this.mode === 'wire' ? 'crosshair' : 'default'));
         this.needsRedraw = true;
         this.onNodeHover?.(node);
       }
@@ -487,17 +717,45 @@ class VizaGraph {
   }
 
   _onMouseUp(e) {
+    const rect = this.canvas.getBoundingClientRect();
+    const world = this._screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
+
+    if (this.wireStart) {
+      const target = this._getNodeAt(world.x, world.y);
+      if (target && target._nodeType === 'file' && target.id !== this.wireStart.id) {
+        this.onWireConnect?.(this.wireStart, target);
+      }
+      this.wireStart = null;
+      this.canvas.classList.remove('grabbing');
+      this.needsRedraw = true;
+      return;
+    }
+
     if (this.draggingNode) {
-      const rect = this.canvas.getBoundingClientRect();
-      const world = this._screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
+      // Check if it was a click (not drag)
       const dx = world.x - this.dragOffset.x - this.draggingNode.x;
       const dy = world.y - this.dragOffset.y - this.draggingNode.y;
-      if (Math.abs(dx) < 3 && Math.abs(dy) < 3) this.selectNode(this.draggingNode);
+      if (Math.abs(dx) < 3 && Math.abs(dy) < 3) {
+        // Check chevron click
+        if (this._isChevronClick(this.draggingNode, world.x)) {
+          this.toggleExpand(this.draggingNode.id);
+        } else {
+          this.selectNode(this.draggingNode);
+        }
+      }
       this.draggingNode = null;
     } else if (this.isPanning) {
       this.isPanning = false;
       const moved = Math.abs(e.clientX - this.panStart.x) + Math.abs(e.clientY - this.panStart.y);
-      if (moved < 3) this.selectNode(null);
+      if (moved < 3) {
+        // Click on empty space or on a child node
+        const node = this._getNodeAt(world.x, world.y);
+        if (node && node._nodeType === 'symbol') {
+          this.selectNode(node);
+        } else {
+          this.selectNode(null);
+        }
+      }
     }
     this.canvas.classList.remove('grabbing');
     this.needsRedraw = true;
@@ -506,7 +764,7 @@ class VizaGraph {
   _onWheel(e) {
     e.preventDefault();
     const delta = e.deltaY > 0 ? 0.9 : 1.1;
-    this.camera.zoom = Math.max(0.15, Math.min(4, this.camera.zoom * delta));
+    this.camera.zoom = Math.max(0.1, Math.min(5, this.camera.zoom * delta));
     this.needsRedraw = true;
   }
 
@@ -514,7 +772,15 @@ class VizaGraph {
     const rect = this.canvas.getBoundingClientRect();
     const world = this._screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
     const node = this._getNodeAt(world.x, world.y);
-    if (node) this.focusNode(node);
+    if (node) {
+      if (node._nodeType === 'file') {
+        this.toggleExpand(node.id);
+        this.selectNode(node);
+      } else if (node._nodeType === 'symbol') {
+        this.selectNode(node);
+        this.onSymbolSelect?.(node);
+      }
+    }
   }
 
   _onContextMenu(e) {
@@ -522,13 +788,13 @@ class VizaGraph {
     const rect = this.canvas.getBoundingClientRect();
     const world = this._screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
     const node = this._getNodeAt(world.x, world.y);
-    if (node) this.onNodeContextMenu?.(node, e.clientX, e.clientY);
+    this.onNodeContextMenu?.(node, e.clientX, e.clientY);
   }
 
   _onTouchStart(e) {
     if (e.touches.length === 1) {
       const t = e.touches[0];
-      this._onMouseDown({ clientX: t.clientX, clientY: t.clientY, button: 0 });
+      this._onMouseDown({ clientX: t.clientX, clientY: t.clientY, button: 0, preventDefault: () => {} });
     }
   }
 
@@ -549,10 +815,14 @@ class VizaGraph {
   selectNode(node) {
     this.selectedNode = node;
     this.highlightedEdges.clear();
-    if (node) {
+    const fileId = node?._nodeType === 'symbol' ? node._parentId : node?.id;
+    if (fileId) {
       for (const e of this.edges) {
-        if (e.source === node.id || e.target === node.id) this.highlightedEdges.add(e.id);
+        if (e.source === fileId || e.target === fileId) this.highlightedEdges.add(e.id);
       }
+    }
+    if (node?._nodeType === 'symbol') {
+      this.onSymbolSelect?.(node);
     }
     this.onNodeSelect?.(node);
     this.needsRedraw = true;
@@ -560,15 +830,18 @@ class VizaGraph {
 
   focusNode(node) {
     if (!node) return;
-    this.camera.x = this.width / 2 - node.x;
-    this.camera.y = this.height / 2 - node.y;
+    const target = node._nodeType === 'symbol'
+      ? this.nodeMap.get(node._parentId) || node
+      : node;
+    this.camera.x = this.width / 2 - target.x;
+    this.camera.y = this.height / 2 - target.y;
     this.camera.zoom = 1.2;
     this.selectNode(node);
     this.needsRedraw = true;
   }
 
   focusNodeById(id) {
-    const n = this.nodeMap.get(id);
+    const n = this.nodeMap.get(id) || this.childMap.get(id);
     if (n) this.focusNode(n);
   }
 
@@ -590,12 +863,13 @@ class VizaGraph {
     this.needsRedraw = true;
   }
 
-  zoomIn() { this.camera.zoom = Math.min(4, this.camera.zoom * 1.25); this.needsRedraw = true; }
-  zoomOut() { this.camera.zoom = Math.max(0.15, this.camera.zoom / 1.25); this.needsRedraw = true; }
+  zoomIn() { this.camera.zoom = Math.min(5, this.camera.zoom * 1.25); this.needsRedraw = true; }
+  zoomOut() { this.camera.zoom = Math.max(0.1, this.camera.zoom / 1.25); this.needsRedraw = true; }
 
   setMode(m) {
     this.mode = m;
-    this.canvas.style.cursor = m === 'pan' ? 'grab' : 'default';
+    this.wireStart = null;
+    this.canvas.style.cursor = m === 'pan' ? 'grab' : m === 'wire' ? 'crosshair' : 'default';
   }
 
   toggleEdges() { this.showEdges = !this.showEdges; this.needsRedraw = true; return this.showEdges; }
@@ -631,13 +905,19 @@ class VizaGraph {
     const q = query.toLowerCase();
     const matches = [];
     for (const n of this.nodes) {
-      if (
-        n.name.toLowerCase().includes(q) ||
-        n.path.toLowerCase().includes(q) ||
-        n.language?.toLowerCase().includes(q) ||
-        n.metadata?.functions?.some(f => f.toLowerCase().includes(q)) ||
-        n.metadata?.classes?.some(c => c.toLowerCase().includes(q))
-      ) {
+      let matched = false;
+      if (n.name.toLowerCase().includes(q) || n.path.toLowerCase().includes(q) || n.language?.toLowerCase().includes(q)) {
+        matched = true;
+      }
+      // Also search symbols
+      if (n.symbols?.some(s => s.name.toLowerCase().includes(q))) {
+        matched = true;
+      }
+      if (n.metadata?.functions?.some(f => f.toLowerCase().includes(q)) ||
+          n.metadata?.classes?.some(c => c.toLowerCase().includes(q))) {
+        matched = true;
+      }
+      if (matched) {
         this.searchMatches.add(n.id);
         matches.push(n);
       }
@@ -653,6 +933,27 @@ class VizaGraph {
       if (e.target === id) { const s = this.nodeMap.get(e.source); if (s) incoming.push({ node: s, edge: e }); }
     }
     return { incoming, outgoing };
+  }
+
+  addNode(node) {
+    node._nodeType = 'file';
+    node.vx = 0;
+    node.vy = 0;
+    node.w = this._calcWidth(node);
+    node.h = this.collapsedH;
+    node.visible = true;
+    node._children = [];
+    this.nodes.push(node);
+    this.nodeMap.set(node.id, node);
+    this.needsRedraw = true;
+    return node;
+  }
+
+  addEdge(edge) {
+    if (!this.edges.find(e => e.id === edge.id)) {
+      this.edges.push(edge);
+      this.needsRedraw = true;
+    }
   }
 
   destroy() {

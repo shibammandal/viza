@@ -1,6 +1,6 @@
 # Viza 
  
-A visual scripting step towards vibe coding <>
+A visual scripting step towards vibe coding <> 
 
 ##  Features
 
